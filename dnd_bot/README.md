@@ -97,12 +97,24 @@ O processo agora tenta reconectar automaticamente a cada 15 segundos.
 dnd_bot/
 ├── bot.py          # Bot Telegram + handlers dos comandos
 ├── narrator.py     # Integração com Gemini (narrativa + imagem)
-├── database.py     # SQLite — sessões, personagens, histórico
+├── database.py     # Supabase/Postgres (produção) ou SQLite (local)
 ├── .env            # Suas chaves (não commitar!)
 ├── .env.example    # Modelo do .env
 ├── requirements.txt
 └── dnd.db          # Criado automaticamente ao rodar
 ```
+
+### Banco de dados em produção
+
+Por padrão, o bot usa SQLite em `DATABASE_PATH` (ideal para desenvolvimento
+local). Para produção, defina `SUPABASE_DB_URL` com a URL de conexão Postgres
+do Supabase; ela tem prioridade sobre `DATABASE_PATH` e não há fallback
+silencioso para SQLite em caso de erro de conexão. Use sempre uma URL com
+`sslmode=require` e mantenha a senha apenas no ambiente de execução.
+
+O schema versionado está em
+`supabase/migrations/20260917214300_initial_schema.sql`. A aplicação também
+cria as tabelas na primeira conexão para facilitar instalações existentes.
 
 ---
 

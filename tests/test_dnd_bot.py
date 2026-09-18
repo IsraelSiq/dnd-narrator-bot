@@ -43,6 +43,25 @@ class DatabaseTests(unittest.TestCase):
                 database.obter_personagem(2, 1)["atributos"], {"Destreza": 16}
             )
 
+    def test_public_operations_and_new_session_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(str(Path(directory) / "test.db"))
+            database.criar_sessao(1, "primeiro")
+            database.salvar_personagem(
+                2, 1, "Kira", "Ladina", "Elfica", {"Destreza": 16}, "historia"
+            )
+            database.registrar_acao(2, 1, "explorar", "Encontrou uma porta")
+            database.atualizar_contexto(1, "contexto atualizado")
+
+            self.assertEqual(database.obter_sessao(1)["contexto"], "contexto atualizado")
+            self.assertEqual(len(database.listar_jogadores(1)), 1)
+            self.assertEqual(database.historico_recente(1)[0]["acao"], "explorar")
+
+            # Starting a new adventure isolates all state from the old one.
+            database.criar_sessao(1, "segundo")
+            self.assertEqual(database.listar_jogadores(1), [])
+            self.assertEqual(database.historico_recente(1), [])
+
 
 if __name__ == "__main__":
     unittest.main()

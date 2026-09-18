@@ -31,7 +31,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-db       = Database(os.getenv("DATABASE_PATH", "dnd.db"))
+db       = Database(
+    path=os.getenv("DATABASE_PATH", "dnd.db"),
+    db_url=os.getenv("SUPABASE_DB_URL"),
+)
 narrator = Narrator(os.getenv("GEMINI_API_KEY"))
 
 

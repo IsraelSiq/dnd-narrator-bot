@@ -12,8 +12,11 @@ Copy-Item .env.example .env
 python bot.py
 ```
 
-Configure os tokens no `.env`. Consulte [`dnd_bot/README.md`](dnd_bot/README.md)
-para as opções de Gemini, Groq, OpenRouter, Ollama, proxy e implantação.
+Configure os tokens no `.env`. Para desenvolvimento, o banco usa SQLite em
+`DATABASE_PATH` (padrão `dnd.db`). Em produção, defina
+`SUPABASE_DB_URL` com uma URL Postgres do Supabase; ela tem prioridade sobre
+`DATABASE_PATH`. Consulte [`dnd_bot/README.md`](dnd_bot/README.md) para as
+opções de Gemini, Groq, OpenRouter, Ollama, proxy e implantação.
 
 ## Testes
 
