@@ -405,6 +405,18 @@ Retorne APENAS JSON válido (sem markdown):
     async def _generate_json(self, prompt: str, fallback: dict) -> dict:
         if self.model is None and not self.api_key and not self.alt_api_key:
             return fallback
+
+        # Quando configurado, o provedor alternativo é a rota principal.
+        # Isso evita consumir uma cota Gemini já esgotada antes de narrar.
+        if self.alt_api_key and self.alt_base_url and self.alt_model:
+            try:
+                return await self._generate_json_compatible(prompt)
+            except Exception as exc:
+                log.warning(
+                    "Falha no provedor alternativo (%s); tentando Gemini",
+                    exc,
+                )
+
         try:
             if self.model is not None:
                 resposta = await self.model.generate_content_async(prompt)
@@ -415,11 +427,6 @@ Retorne APENAS JSON válido (sem markdown):
             log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
         except Exception as exc:
             log.warning("Falha ao consultar Gemini; tentando provedor alternativo: %s", exc)
-        if self.alt_api_key and self.alt_base_url and self.alt_model:
-            try:
-                return await self._generate_json_compatible(prompt)
-            except Exception as exc:
-                log.warning("Falha no provedor alternativo; usando fallback: %s", exc)
         return fallback
 
     async def _generate_json_compatible(self, prompt: str) -> dict:
