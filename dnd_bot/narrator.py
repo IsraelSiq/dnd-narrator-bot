@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 import asyncio
+import time
 import unicodedata
 
 try:
@@ -40,6 +41,8 @@ class Narrator:
         self.alt_api_key = os.getenv("AI_API_KEY", "")
         self.alt_base_url = os.getenv("AI_BASE_URL", "").rstrip("/")
         self.alt_model = os.getenv("AI_MODEL", "")
+        self._provider_cooldowns = {}
+        self._cooldown_seconds = int(os.getenv("AI_PROVIDER_COOLDOWN", "300"))
         self.model = None
         self.image_model = None
         self.provider_status = "offline"
@@ -408,26 +411,56 @@ Retorne APENAS JSON válido (sem markdown):
 
         # Quando configurado, o provedor alternativo é a rota principal.
         # Isso evita consumir uma cota Gemini já esgotada antes de narrar.
-        if self.alt_api_key and self.alt_base_url and self.alt_model:
+        if (
+            self.alt_api_key
+            and self.alt_base_url
+            and self.alt_model
+            and self._provider_available("alternate")
+        ):
             try:
                 return await self._generate_json_compatible(prompt)
             except Exception as exc:
+                self._cooldown_provider("alternate", exc)
                 log.warning(
                     "Falha no provedor alternativo (%s); tentando Gemini",
                     exc,
                 )
 
         try:
-            if self.model is not None:
+            if self.model is not None and self._provider_available("gemini"):
                 resposta = await self.model.generate_content_async(prompt)
                 return self._parse_json(resposta.text)
-            if self.api_key:
+            if self.api_key and self._provider_available("gemini"):
                 return await self._generate_json_rest(prompt)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._cooldown_provider("gemini", exc)
             log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
         except Exception as exc:
+            self._cooldown_provider("gemini", exc)
             log.warning("Falha ao consultar Gemini; tentando provedor alternativo: %s", exc)
         return fallback
+
+    def _provider_available(self, provider: str) -> bool:
+        until = self._provider_cooldowns.get(provider, 0)
+        if until <= time.monotonic():
+            self._provider_cooldowns.pop(provider, None)
+            return True
+        return False
+
+    def _cooldown_provider(self, provider: str, error: Exception) -> None:
+        text = str(error).lower()
+        if any(
+            marker in text
+            for marker in ("429", "quota", "rate limit", "resource exhausted", "too many")
+        ):
+            self._provider_cooldowns[provider] = (
+                time.monotonic() + self._cooldown_seconds
+            )
+            log.warning(
+                "Provedor %s em cooldown por %ss após limite de uso",
+                provider,
+                self._cooldown_seconds,
+            )
 
     async def _generate_json_compatible(self, prompt: str) -> dict:
         base_payload = {

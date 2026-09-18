@@ -54,6 +54,11 @@ class NarratorTests(unittest.TestCase):
         )
         self.assertFalse(result["precisa_teste"])
 
+    def test_provider_quota_enters_cooldown(self):
+        narrator = Narrator("")
+        narrator._cooldown_provider("alternate", RuntimeError("HTTP 429 quota exceeded"))
+        self.assertFalse(narrator._provider_available("alternate"))
+
     def test_suggestions_follow_current_scene(self):
         narrator = Narrator("")
         session = {
