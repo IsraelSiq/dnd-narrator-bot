@@ -217,7 +217,8 @@ async def receber_raca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def receber_detalhes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    estado = estados_entrada(ctx).pop(estado_key(update), None)
+    chave = estado_key(update)
+    estado = estados_entrada(ctx).get(chave)
     if not estado or "personagem" not in estado:
         await update.message.reply_text("⚠️ A criação expirou. Use /entrar novamente.")
         return
@@ -230,13 +231,24 @@ async def receber_detalhes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         detalhes = ""
 
     await update.message.reply_text("🧙 Criando sua ficha...", reply_markup=ReplyKeyboardRemove())
-    ficha = await narrator.criar_personagem(nome, classe, raca, detalhes)
+    try:
+        ficha = await narrator.criar_personagem(nome, classe, raca, detalhes)
+        if not isinstance(ficha, dict) or not ficha.get("atributos") or not ficha.get("historia"):
+            raise ValueError("A IA retornou uma ficha incompleta.")
+        db.salvar_personagem(
+            user_id=update.effective_user.id, chat_id=update.effective_chat.id,
+            nome=nome, classe=classe, raca=raca,
+            atributos=ficha["atributos"], historia=ficha["historia"]
+        )
+    except Exception:
+        log.exception("Falha ao finalizar criação de personagem")
+        await update.message.reply_text(
+            "⚠️ Não consegui finalizar a ficha agora. Seus dados foram preservados; "
+            "envie os detalhes novamente ou use /cancelar."
+        )
+        return ENTRAR_DETALHES
 
-    db.salvar_personagem(
-        user_id=update.effective_user.id, chat_id=update.effective_chat.id,
-        nome=nome, classe=classe, raca=raca,
-        atributos=ficha["atributos"], historia=ficha["historia"]
-    )
+    estados_entrada(ctx).pop(chave, None)
 
     await update.message.reply_text(
         f"✅ *{escapa(nome)} entrou na aventura\\!*\n\n"
