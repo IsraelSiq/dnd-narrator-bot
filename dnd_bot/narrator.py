@@ -7,6 +7,9 @@ import logging
 import os
 import random
 import re
+import urllib.parse
+import urllib.request
+import asyncio
 
 try:
     import google.generativeai as genai
@@ -46,6 +49,9 @@ class Narrator:
             self.provider_status = f"gemini:{model_name}"
         else:
             log.warning("Gemini indisponível; usando o narrador offline.")
+        log.info("Narrador configurado: provedor=%s, imagens=%s",
+                 self.provider_status,
+                 os.getenv("IMAGE_PROVIDER", "pollinations"))
 
     # ── Iniciar aventura ──────────────────────────────────────────────────────
 
@@ -311,7 +317,7 @@ Retorne APENAS JSON válido (sem markdown):
         imagem_bytes = None
         try:
             if self.image_model is None or gtypes is None:
-                return {"descricao": dados["descricao"], "imagem_bytes": None}
+                raise RuntimeError("modelo de imagem Gemini indisponível")
             resp_img = await self.image_model.generate_content_async(
                 dados["image_prompt"],
                 generation_config=gtypes.GenerationConfig(
@@ -324,6 +330,19 @@ Retorne APENAS JSON válido (sem markdown):
                     break
         except Exception as e:
             log.warning("Imagem indisponível: %s", e)
+            if os.getenv("IMAGE_PROVIDER", "pollinations").lower() == "pollinations":
+                try:
+                    encoded = urllib.parse.quote(dados["image_prompt"], safe="")
+                    url = (
+                        "https://image.pollinations.ai/prompt/" + encoded
+                        + "?width=1024&height=768&nologo=true"
+                    )
+                    imagem_bytes = await asyncio.to_thread(
+                        lambda: urllib.request.urlopen(url, timeout=45).read()
+                    )
+                    log.info("Imagem da cena gerada pelo fallback Pollinations")
+                except Exception as fallback_error:
+                    log.warning("Fallback de imagem indisponível: %s", fallback_error)
 
         return {"descricao": dados["descricao"], "imagem_bytes": imagem_bytes}
 
