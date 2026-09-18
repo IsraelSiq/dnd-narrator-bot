@@ -20,6 +20,24 @@ class NarratorTests(unittest.TestCase):
         parsed = Narrator("")._parse_json("```json\n{\"ok\": true}\n```")
         self.assertEqual(parsed, {"ok": True})
 
+    def test_offline_action_advances_context_and_scene(self):
+        narrator = Narrator("")
+        session = {"contexto": "Localização: Farol Antigo. Ameaça: ruínas despertas."}
+        character = {
+            "nome": "Kira",
+            "classe": "Ladina",
+            "raca": "Elfa",
+            "atributos": {"Destreza": 16},
+        }
+        result = asyncio.run(
+            narrator.narrar_acao_com_dado(
+                session, character, [character], "examino as pegadas", None
+            )
+        )
+        self.assertIn("Progressão: ação 1", result["novo_contexto"])
+        scene = asyncio.run(narrator.gerar_cena({"contexto": result["novo_contexto"]}))
+        self.assertIn("etapa 1", scene["descricao"])
+
 
 class DiceTests(unittest.TestCase):
     def test_attribute_modifier_and_result_shape(self):

@@ -218,17 +218,23 @@ Retorne APENAS JSON válido (sem markdown):
   "sugestoes": ["Sugestão 1 coerente com a situação", "Sugestão 2", "Sugestão 3"]
 }}"""
 
-        local_atual = sessao["contexto"].split(".")[0].strip()
+        contexto_atual = sessao["contexto"].strip()
+        numero_acao = len(re.findall(r"(?:Última ação|Ação registrada):", contexto_atual)) + 1
+        local_atual = self._localizacao_atual(contexto_atual)
+        proximo_estado = (
+            f"Localização: {local_atual}. "
+            f"Progressão: ação {numero_acao} concluída por {personagem['nome']}; "
+            f"pista ou consequência revelada após tentar {acao}. "
+            "A ameaça continua ativa e o próximo passo depende das escolhas do grupo."
+        )
         fallback = {
             "narrativa": (
-                f"Em {local_atual}, {personagem['nome']} age com cautela. "
-                "O resultado da tentativa muda a situação, mas o perigo ainda "
-                "não foi vencido. Uma nova pista surge diante do grupo."
+                f"Em {local_atual}, {personagem['nome']} age e altera o rumo da cena. "
+                f"A tentativa de {acao} revela uma nova pista e provoca uma "
+                "consequência imediata: o ambiente reage, e o perigo se aproxima. "
+                "O grupo agora precisa decidir como explorar essa mudança."
             ),
-            "novo_contexto": (
-                f"{sessao['contexto']} Estado após a ação: {personagem['nome']} "
-                f"tentou {acao}. A situação avançou e uma nova pista foi revelada."
-            ),
+            "novo_contexto": proximo_estado,
             "sugestoes": [
                 "Examino os sinais recentes na área.",
                 "Avanço com o grupo mantendo a guarda.",
@@ -264,7 +270,7 @@ Retorne APENAS JSON válido (sem markdown):
     {{"acao": "...", "atributo": "...", "cd": 18, "risco": "..."}}
   ]
 }}"""
-        local_atual = sessao["contexto"].split(".")[0].strip()
+        local_atual = self._localizacao_atual(sessao["contexto"])
         return await self._generate_json(prompt, {
             "sugestoes": [
                 {"acao": f"Examino os sinais em {local_atual}.", "atributo": "Sabedoria", "cd": 10, "risco": "baixo"},
@@ -287,11 +293,13 @@ Retorne APENAS JSON válido (sem markdown):
   "image_prompt": "Epic fantasy D&D scene, [detailed scene in English], dramatic lighting, detailed illustration, fantasy art style"
 }}"""
         contexto = sessao.get("contexto", "").strip()
-        local = contexto.split(".")[0].strip() or "a localização atual da aventura"
+        local = self._localizacao_atual(contexto)
+        progresso = self._progresso_atual(contexto)
         dados = await self._generate_json(prompt_desc, {
             "descricao": (
-                f"A cena atual se passa em {local}. O ambiente mostra os sinais "
-                "mais recentes da aventura e permanece em estado de alerta."
+                f"A cena atual se passa em {local}. Esta é a etapa {progresso} "
+                "da aventura; o ambiente mostra a consequência mais recente da "
+                "ação do grupo e permanece em estado de alerta."
             ),
             "image_prompt": (
                 "Current D&D fantasy adventure scene at "
@@ -318,6 +326,19 @@ Retorne APENAS JSON válido (sem markdown):
             log.warning("Imagem indisponível: %s", e)
 
         return {"descricao": dados["descricao"], "imagem_bytes": imagem_bytes}
+
+    @staticmethod
+    def _localizacao_atual(contexto: str) -> str:
+        """Obtém a localização mais recente, inclusive no fallback offline."""
+        locais = re.findall(r"Localização:\s*([^.;]+)", contexto, flags=re.IGNORECASE)
+        return locais[-1].strip() if locais else (
+            contexto.split(".")[0].strip() or "a localização atual da aventura"
+        )
+
+    @staticmethod
+    def _progresso_atual(contexto: str) -> int:
+        etapas = re.findall(r"(?:Progressão: ação|ação registrada:)\s*(\d+)", contexto, flags=re.IGNORECASE)
+        return int(etapas[-1]) if etapas else 0
 
     # ── Util ──────────────────────────────────────────────────────────────────
 
