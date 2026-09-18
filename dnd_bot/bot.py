@@ -210,8 +210,9 @@ async def receber_raca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "4️⃣ Agora descreva detalhes do personagem (opcional): arquétipo, manias, "
         "medos, objetivo, profissão anterior ou qualquer detalhe histórico.\n\n"
-        "Escreva `nenhum` se prefere que o narrador decida.",
-        reply_markup=ReplyKeyboardRemove()
+        "Responda diretamente a esta mensagem. Escreva `nenhum` se prefere "
+        "que o narrador decida.",
+        reply_markup=ForceReply(selective=True)
     )
     return ENTRAR_DETALHES
 
