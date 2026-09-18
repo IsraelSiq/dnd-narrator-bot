@@ -1,56 +1,50 @@
-"""
-narrator.py — Toda a inteligência do jogo via Gemini
-"""
-
+import asyncio
 import json
 import logging
 import os
 import random
 import re
-import urllib.parse
-import urllib.error
-import urllib.request
-import asyncio
 import time
-import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 
 try:
     import google.generativeai as genai
-    from google.generativeai import types as gtypes
-except Exception:  # O modo offline também cobre incompatibilidade do SDK.
+except Exception:  # pragma: no cover - SDK optional in offline environments
     genai = None
-    gtypes = None
-
 
 log = logging.getLogger(__name__)
 
-
 SYSTEM_PROMPT = """Você é um Mestre de RPG experiente e criativo especializado em D&D 5e.
-Você narra aventuras épicas, dramáticas e imersivas em português do Brasil.
-Seu estilo é cinematográfico, com descrições vívidas e tensão dramática adequada.
-Sempre mantenha a consistência com o contexto da aventura e as escolhas dos jogadores.
-Seja justo, mas desafiador. Recompense a criatividade.
-Quando houver falha crítica (dado 1), o resultado deve ser catastrófico e cômico/dramático.
-Quando houver sucesso crítico (dado 20), o resultado deve ser épico e memorável."""
+Você narra aventuras imersivas em português do Brasil com descrições vívidas e tensão dramática.
+Sempre mantenha consistência com o contexto da aventura e as ações anteriores.
+Seja criativo, mas não invente fatos que contradigam o estado atual da sessão.
+Retorne sempre JSON válido, sem markdown, sem explicações extras.
+"""
 
 
 class Narrator:
     def __init__(self, api_key: str):
         self.api_key = api_key or ""
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.alt_api_key = os.getenv("AI_API_KEY", "")
-        self.alt_base_url = os.getenv("AI_BASE_URL", "").rstrip("/")
+        self.alt_base_url = (os.getenv("AI_BASE_URL", "") or "").rstrip("/")
         self.alt_model = os.getenv("AI_MODEL", "")
+        self.bastiao_base_url = (os.getenv("BASTIAO_BASE_URL", "") or "").rstrip("/")
+        self.bastiao_api_key = os.getenv("BASTIAO_API_KEY", "")
+        self.bastiao_model = os.getenv("BASTIAO_MODEL", "")
         self._provider_cooldowns = {}
         self._cooldown_seconds = int(os.getenv("AI_PROVIDER_COOLDOWN", "300"))
         self.model = None
         self.image_model = None
         self.provider_status = "offline"
-        if api_key and genai is not None:
-            genai.configure(api_key=api_key)
+
+        if self.api_key and genai is not None:
+            genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel(
                 model_name=self.model_name,
-                system_instruction=SYSTEM_PROMPT
+                system_instruction=SYSTEM_PROMPT,
             )
             self.image_model = genai.GenerativeModel(
                 os.getenv("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002")
@@ -59,85 +53,70 @@ class Narrator:
         elif self.api_key:
             self.provider_status = f"gemini-rest:{self.model_name}"
         else:
-            log.warning("Gemini indisponível; usando o narrador offline.")
-        log.info("Narrador configurado: provedor=%s, imagens=%s",
-                 self.provider_status,
-                 os.getenv("IMAGE_PROVIDER", "pollinations"))
+            log.warning("Gemini indisponível; usando narrador offline por padrão.")
+
         if self.alt_api_key and self.alt_base_url and self.alt_model:
             log.info("Provedor alternativo configurado: %s", self.alt_model)
+        if self.bastiao_api_key and self.bastiao_base_url and self.bastiao_model:
+            log.info("Bastião local configurado: %s", self.bastiao_model)
 
-    # ── Iniciar aventura ──────────────────────────────────────────────────────
+    def _cooldown_provider(self, provider: str, exc: Exception):
+        self._provider_cooldowns[provider] = time.time() + self._cooldown_seconds
+        log.warning("Provider %s entrou em cooldown por erro: %s", provider, exc)
 
-    async def iniciar_aventura(self, chat_id: int) -> dict:
-        prompt = """Crie o início de uma aventura D&D original e envolvente.
-Retorne APENAS um JSON válido (sem markdown):
-{
-  "titulo": "Nome épico da aventura",
-  "narrativa": "Narração de abertura imersiva com 3-4 parágrafos",
-  "contexto": "Resumo técnico do estado atual (localização, ameaças, objetivos, elementos do cenário)"
-}"""
-        aventuras = [
+    def _provider_available(self, provider: str) -> bool:
+        until = self._provider_cooldowns.get(provider)
+        if until and time.time() < until:
+            return False
+        return True
+
+    def _parse_json(self, raw: str):
+        if raw is None:
+            raise ValueError("Resposta vazia da IA")
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+            text = re.sub(r"\s*```\s*$", "", text, flags=re.I)
+        text = text.strip()
+        if not text:
+            raise ValueError("Resposta vazia depois do parse")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Heurística para extrair um JSON embutido de blocos de texto
+            match = re.search(r"\{.*\}", text, flags=re.S)
+            if match:
+                return json.loads(match.group(0))
+            raise
+
+    def _offline_scene_seed(self, chat_id: int) -> dict:
+        seed = (chat_id if chat_id else 1) % 4
+        templates = [
             {
                 "titulo": "As Cinzas do Farol Antigo",
-                "narrativa": "Uma luz azul desperta no farol abandonado durante a tempestade. Pegadas recentes e correntes quebradas indicam que algo despertou sob as ruínas.",
-                "contexto": "Localização: Farol Antigo. Ameaça: presença desconhecida sob as ruínas. Objetivo: investigar a luz azul.",
+                "narrativa": "Um farol abandonado treme ao longo da tempestade. Pegadas recentes cruzam o chão de pedra, e a porta de ferro da torre parece estar parcialmente aberta. O silêncio pesa mais que o vento.",
+                "contexto": "Localização: Farol Antigo. Ameaça: ruínas despertas. Objetivo: investigar a torre e descobrir por que as pegadas voltaram a aparecer.",
             },
             {
                 "titulo": "O Juramento da Floresta Sombria",
-                "narrativa": "A floresta silencia quando uma árvore ancestral começa a sangrar seiva dourada. Um corvo deixa aos seus pés uma chave marcada com o brasão de um reino desaparecido.",
-                "contexto": "Localização: clareira da Floresta Sombria. Ameaça: maldição na árvore ancestral. Objetivo: descobrir a origem da chave.",
+                "narrativa": "A floresta emudeceu quando a lua apareceu acima das copas. Entre as árvores, uma clareira se abre com um altar coberto por musgo e runas antigas, como se a natureza estivesse esperando alguém ser corajoso o bastante para despertar a promessa.",
+                "contexto": "Localização: Floresta Sombria. Ameaça: matilha de criaturas e altar antigo. Objetivo: descobrir o que a clareira guarda e por que a magia está despertando.",
             },
             {
-                "titulo": "A Cripta sob a Cidade",
-                "narrativa": "Na praça central, a terra afunda e revela degraus que descem para uma cripta esquecida. De lá vem o som de sinos, embora a cidade não tenha uma torre.",
-                "contexto": "Localização: praça da cidade. Ameaça: cripta recém-aberta e sinos sobrenaturais. Objetivo: explorar as ruínas.",
+                "titulo": "A Cripta de Pedra Viva",
+                "narrativa": "Uma câmara sepulcral respira por baixo da cidade. O ar cheira a poeira de túmulos e a magia antiga. Alguém já esteve ali antes, e o eco da descoberta parece levar o grupo em direção a um segredo enterrado.",
+                "contexto": "Localização: Cripta de Pedra Viva. Ameaça: guardas mortos e portas seladas. Objetivo: explorar o interior e quebrar o selo que prende a memória da cidade.",
             },
             {
-                "titulo": "O Tremor da Montanha Vermelha",
-                "narrativa": "Um tremor racha a encosta e expõe uma porta de obsidiana. Símbolos antigos brilham quando vocês se aproximam, como se a montanha reconhecesse seus nomes.",
-                "contexto": "Localização: encosta da Montanha Vermelha. Ameaça: porta selada e magia antiga. Objetivo: descobrir o que está despertando.",
+                "titulo": "O Templo do Vento Silencioso",
+                "narrativa": "Pilares quebrados cercam um templo abandonado em meio ao deserto. Há música no vento, mas não é natural. Cada passo ecoa como um aviso: a lenda ainda não terminou, e algo dorme sob o altar central.",
+                "contexto": "Localização: Templo do Vento Silencioso. Ameaça: ventos encantados e guardianas anciãs. Objetivo: entrar no templo e revelar a verdade sobre o sussurro do vento.",
             },
         ]
-        return await self._generate_json(prompt, random.choice(aventuras))
+        return templates[seed]
 
-    # ── Criar personagem ──────────────────────────────────────────────────────
-
-    async def criar_personagem(
-        self, nome: str, classe: str, raca: str, detalhes: str = ""
-    ) -> dict:
-        prompt = f"""Crie uma ficha D&D 5e para:
-Nome: {nome} | Classe: {classe} | Raça: {raca}
-Detalhes fornecidos pelo jogador: {detalhes or "nenhum; invente uma origem coerente"}
-
-Retorne APENAS JSON válido (sem markdown):
-{{
-  "atributos": {{
-    "Força": <8-18>,
-    "Destreza": <8-18>,
-    "Constituição": <8-18>,
-    "Inteligência": <8-18>,
-    "Sabedoria": <8-18>,
-    "Carisma": <8-18>
-  }},
-  "historia": "História de origem em 2-3 frases"
-}}
-
-Regras obrigatórias de D&D 5e:
-- A classe não concede bônus ou penalidade de atributo; use-a apenas para
-  escolher atributos recomendados e escrever a história.
-- Aplique somente os bônus raciais padrão da raça escolhida.
-- Não crie penalizadores raciais.
-Humano: +1 em todos; Elfo: +2 Destreza, +1 Inteligência; Anão: +2 Constituição,
-+1 Sabedoria; Halfling: +2 Destreza, +1 Carisma; Tiefling: +1 Inteligência,
-+2 Carisma; Meio-Orc: +2 Força, +1 Constituição.
-Distribua valores-base entre 8 e 15 e retorne os valores finais após os bônus.
-Use os detalhes do jogador para adaptar a história, os atributos recomendados e
-a personalidade, sem alterar as regras de bônus raciais."""
-        atributos_base = {
-            "Força": 12, "Destreza": 12, "Constituição": 12,
-            "Inteligência": 12, "Sabedoria": 11, "Carisma": 11,
-        }
-        bonus_racial = {
+    def _offline_personagem(self, nome: str, classe: str, raca: str, detalhes: str = "") -> dict:
+        racas_bonus = {
             "Humano": {"Força": 1, "Destreza": 1, "Constituição": 1, "Inteligência": 1, "Sabedoria": 1, "Carisma": 1},
             "Elfo": {"Destreza": 2, "Inteligência": 1},
             "Anão": {"Constituição": 2, "Sabedoria": 1},
@@ -145,415 +124,247 @@ a personalidade, sem alterar as regras de bônus raciais."""
             "Tiefling": {"Inteligência": 1, "Carisma": 2},
             "Meio-Orc": {"Força": 2, "Constituição": 1},
         }
-        for atributo, bonus in bonus_racial.get(raca, {}).items():
-            atributos_base[atributo] += bonus
+        base = {"Força": 12, "Destreza": 12, "Constituição": 12, "Inteligência": 12, "Sabedoria": 12, "Carisma": 12}
+        for attr, bonus in racas_bonus.get(raca, {}).items():
+            base[attr] = base.get(attr, 10) + bonus
+        if classe == "Guerreiro":
+            base["Força"] += 2
+            base["Constituição"] += 1
+        elif classe == "Bárbaro":
+            base["Força"] += 3
+            base["Constituição"] += 1
+        elif classe == "Ladino":
+            base["Destreza"] += 2
+            base["Inteligência"] += 1
+        elif classe == "Mago":
+            base["Inteligência"] += 3
+            base["Destreza"] += 1
+        elif classe == "Clérigo":
+            base["Sabedoria"] += 2
+            base["Constituição"] += 1
+        elif classe == "Ranger":
+            base["Destreza"] += 2
+            base["Sabedoria"] += 1
 
-        return await self._generate_json(prompt, {
-            "atributos": atributos_base,
-            "historia": (
-                f"{nome} cresceu entre histórias sobre fronteiras perigosas e "
-                f"aprendeu a sobreviver usando sua vocação de {classe}. "
-                f"Agora, a origem {raca} de {nome} o conduz até esta aventura. "
-                f"Seus traços marcantes são: {detalhes or 'curiosidade e cautela'}."
-            ),
-        })
+        hist = f"{nome} é um {classe.lower()} de {raca.lower()} que nasceu para seguir em direção ao desconhecido."
+        if detalhes and detalhes.strip().lower() not in {"nenhum", "nenhuma", "n/a", "nao", "não"}:
+            hist = hist + f" Seus detalhes pessoais incluem: {detalhes.strip()}"
+        hist += " No momento, o personagem busca um propósito claro e enfrenta o mundo com coragem, disciplina e curiosidade."
+        return {"atributos": base, "historia": hist}
 
-    # ── Avaliar dificuldade da ação ───────────────────────────────────────────
+    def _offline_sugestoes(self, sessao: dict, personagem: dict) -> list:
+        contexto = (sessao or {}).get("contexto", "")
+        base = [
+            "Investigar o ponto mais ameaçador da cena",
+            "Conversar com o NPC mais suspeito",
+            "Procurar uma rota ou passagem secreta",
+        ]
+        if "balcão" in contexto.lower():
+            base.insert(0, "Examinar atentamente o balcão em busca de pistas")
+        if "inimigos" in contexto.lower() or "ameaça" in contexto.lower():
+            base.insert(0, "Avaliar a melhor forma de enfrentar os inimigos")
+        if "porta" in contexto.lower() or "passagem" in contexto.lower():
+            base.insert(0, "Explorar a passagem ou porta escondida")
+        return [{"acao": item, "atributo": "Destreza", "cd": 12, "risco": "médio"} for item in base[:3]]
 
-    async def avaliar_acao(self, sessao: dict, acao: str) -> dict:
-        """
-        Pede ao Gemini para avaliar a ação ANTES de narrar:
-        - Qual atributo usar (se não detectado automaticamente)
-        - CD (Classe de Dificuldade): 5=fácil, 10=médio, 15=difícil, 20=muito difícil, 25=quase impossível
-        - Se precisa de teste ou é automático
-        """
-        prompt = f"""CONTEXTO DA AVENTURA:
-{sessao['contexto']}
+    def _call_gemini_json(self, prompt: str):
+        if not self.api_key or genai is None or not self.model:
+            raise RuntimeError("Gemini não configurado")
+        response = self.model.generate_content(prompt)
+        text = response.text if hasattr(response, "text") else str(response)
+        return self._parse_json(text)
 
-AÇÃO DO JOGADOR: "{acao}"
-
-Analise esta ação e retorne APENAS JSON válido (sem markdown):
-{{
-  "precisa_teste": true ou false,
-  "atributo": "Força|Destreza|Constituição|Inteligência|Sabedoria|Carisma",
-  "cd": <5 a 25>,
-  "justificativa": "Por que este atributo e esta CD (1 frase curta)"
-}}
-
-Se a ação for trivial (andar, falar normalmente, pegar objeto em cima de uma mesa), precisa_teste=false.
-Se for arriscada ou habilidosa, precisa_teste=true com CD proporcional ao risco."""
-        fallback = {
-            "precisa_teste": True,
-            "atributo": "Destreza",
-            "cd": 12,
-            "justificativa": "A ação envolve risco e exige atenção ou habilidade.",
-        }
-        simples = self._acao_simples(acao)
-        if simples:
-            fallback["precisa_teste"] = False
-            fallback["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
-        resultado = await self._generate_json(prompt, fallback)
-        if simples:
-            resultado["precisa_teste"] = False
-            resultado["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
-        return resultado
-
-    # ── Narrar ação com resultado do dado ────────────────────────────────────
-
-    async def narrar_acao_com_dado(
-        self,
-        sessao: dict,
-        personagem: dict,
-        jogadores: list,
-        acao: str,
-        teste: dict | None = None   # resultado do dice.realizar_teste(), ou None se não houve teste
-    ) -> dict:
-        jogadores_str = ", ".join(
-            f"{j['nome']} ({j['classe']} {j['raca']})" for j in jogadores
-        ) or "Nenhum outro jogador"
-
-        atributos_str = ", ".join(
-            f"{k}: {v}" for k, v in personagem["atributos"].items()
-        )
-
-        # Monta o bloco do teste pra passar pro Gemini
-        if teste:
-            if teste["critico_sucesso"]:
-                resultado_dado = f"SUCESSO CRÍTICO (dado 20 natural)! Narrar resultado ÉPICO e extraordinário."
-            elif teste["falha_critica"]:
-                resultado_dado = f"FALHA CRÍTICA (dado 1 natural)! Narrar resultado DESASTROSO, dramático e possivelmente cômico."
-            elif teste["sucesso"]:
-                resultado_dado = f"SUCESSO (rolou {teste['total']} vs CD {teste['dificuldade']}). Narrar resultado positivo."
-            else:
-                resultado_dado = f"FALHA (rolou {teste['total']} vs CD {teste['dificuldade']}). Narrar consequência negativa ou obstáculo."
-        else:
-            resultado_dado = "Ação simples sem teste, narrar normalmente."
-
-        prompt = f"""CONTEXTO DA AVENTURA:
-{sessao['contexto']}
-
-PERSONAGEM AGINDO:
-Nome: {personagem['nome']} | Classe: {personagem['classe']} | Raça: {personagem['raca']}
-Atributos: {atributos_str}
-
-OUTROS JOGADORES: {jogadores_str}
-
-AÇÃO: "{acao}"
-RESULTADO DO DADO: {resultado_dado}
-
-Continue a aventura a partir EXATAMENTE do contexto fornecido. Não reinicie a
-história, não troque a localização sem justificativa e não mencione cenas de
-outras aventuras. Narre o resultado de forma cinematográfica e imersiva
-respeitando EXATAMENTE o resultado do dado.
-Retorne APENAS JSON válido (sem markdown):
-{{
-  "narrativa": "Narração do resultado (2-3 parágrafos vívidos e dramáticos)",
-  "novo_contexto": "Contexto atualizado da aventura após esta ação",
-  "sugestoes": ["Sugestão 1 coerente com a situação", "Sugestão 2", "Sugestão 3"]
-}}"""
-
-        contexto_atual = sessao["contexto"].strip()
-        numero_acao = len(re.findall(r"(?:Última ação|Ação registrada):", contexto_atual)) + 1
-        local_atual = self._localizacao_atual(contexto_atual)
-        proximo_estado = (
-            f"Localização: {local_atual}. "
-            f"Progressão: ação {numero_acao} concluída por {personagem['nome']}; "
-            f"pista ou consequência revelada após tentar {acao}. "
-            "A ameaça continua ativa e o próximo passo depende das escolhas do grupo."
-        )
-        fallback = {
-            "narrativa": (
-                f"Em {local_atual}, {personagem['nome']} age e altera o rumo da cena. "
-                f"A tentativa de {acao} revela uma nova pista e provoca uma "
-                "consequência imediata: o ambiente reage, e o perigo se aproxima. "
-                "O grupo agora precisa decidir como explorar essa mudança."
-            ),
-            "novo_contexto": proximo_estado,
-            "sugestoes": [
-                "Examino os sinais recentes na área.",
-                "Avanço com o grupo mantendo a guarda.",
-                "Procuro uma pista que ajude a entender a ameaça.",
-            ],
-        }
-        return await self._generate_json(prompt, fallback)
-
-    # ── Sugerir ações para o personagem ──────────────────────────────────────
-
-    async def sugerir_acoes(self, sessao: dict, personagem: dict) -> dict:
-        """Gera sugestões de ação personalizadas com base nos atributos e contexto."""
-        contexto = sessao["contexto"].strip()
-        atributos_str = ", ".join(
-            f"{k}: {v}" for k, v in personagem["atributos"].items()
-        )
-        prompt = f"""CONTEXTO DA AVENTURA:
-{contexto}
-
-PERSONAGEM:
-Nome: {personagem['nome']} | Classe: {personagem['classe']} | Raça: {personagem['raca']}
-Atributos: {atributos_str}
-
-Sugira 5 ações criativas e imediatamente executáveis nesta cena específica.
-Cada ação deve reagir a um elemento concreto do contexto atual (localização,
-ameaça, objetivo, pista, inimigo ou consequência mais recente) e aos pontos
-fortes deste personagem. Não sugira ações genéricas que poderiam servir para
-qualquer aventura e não reinicie a história.
-
-Retorne APENAS JSON válido (sem markdown):
-{{
-  "sugestoes": [
-    {{"acao": "Descrição da ação", "atributo": "Atributo usado", "cd": 12, "risco": "baixo|médio|alto"}},
-    {{"acao": "...", "atributo": "...", "cd": 10, "risco": "..."}},
-    {{"acao": "...", "atributo": "...", "cd": 15, "risco": "..."}},
-    {{"acao": "...", "atributo": "...", "cd": 8,  "risco": "..."}},
-    {{"acao": "...", "atributo": "...", "cd": 18, "risco": "..."}}
-  ]
-}}"""
-        local_atual = self._localizacao_atual(contexto)
-        ameaca = self._campo_contexto(contexto, "Ameaça", "perigo ativo na cena")
-        objetivo = self._campo_contexto(contexto, "Objetivo", "entender a situação atual")
-        pista = self._campo_contexto(contexto, "Progressão", "a última consequência da ação")
-        fallback = {
-            "sugestoes": [
-                {"acao": f"Examino em {local_atual} os sinais ligados a {ameaca}.", "atributo": "Sabedoria", "cd": 10, "risco": "baixo"},
-                {"acao": f"Procuro uma forma de avançar o objetivo: {objetivo}.", "atributo": "Inteligência", "cd": 12, "risco": "médio"},
-                {"acao": f"Investigo a consequência mais recente ({pista}) antes de agir.", "atributo": "Inteligência", "cd": 14, "risco": "médio"},
-                {"acao": f"Encaro ou interpelo quem estiver relacionado a {ameaca}.", "atributo": "Carisma", "cd": 12, "risco": "médio"},
-                {"acao": f"Preparo uma abordagem cautelosa em {local_atual} para conter {ameaca}.", "atributo": "Destreza", "cd": 15, "risco": "alto"},
-            ]
-        }
-        return await self._generate_json(prompt, fallback)
-
-    # ── Gerar cena (imagem) ───────────────────────────────────────────────────
-
-    async def gerar_cena(self, sessao: dict) -> dict:
-        prompt_desc = f"""Com base neste contexto de aventura D&D:
-{sessao['contexto']}
-
-Retorne APENAS JSON válido (sem markdown):
-{{
-  "descricao": "Descrição visual cinematográfica da cena atual em português (2-3 frases)",
-  "image_prompt": "Epic fantasy D&D scene, [detailed scene in English], dramatic lighting, detailed illustration, fantasy art style"
-}}"""
-        contexto = sessao.get("contexto", "").strip()
-        local = self._localizacao_atual(contexto)
-        progresso = self._progresso_atual(contexto)
-        dados = await self._generate_json(prompt_desc, {
-            "descricao": (
-                f"A cena atual se passa em {local}. Esta é a etapa {progresso} "
-                "da aventura; o ambiente mostra a consequência mais recente da "
-                "ação do grupo e permanece em estado de alerta."
-            ),
-            "image_prompt": (
-                "Current D&D fantasy adventure scene at "
-                f"{local}. Context: {contexto}. Cinematic lighting, "
-                "detailed fantasy illustration, no lighthouse unless the context mentions one."
-            ),
-        })
-
-        imagem_bytes = None
-        try:
-            if self.image_model is None or gtypes is None:
-                raise RuntimeError("modelo de imagem Gemini indisponível")
-            resp_img = await self.image_model.generate_content_async(
-                dados["image_prompt"],
-                generation_config=gtypes.GenerationConfig(
-                    response_modalities=["IMAGE"]
-                )
-            )
-            for part in resp_img.candidates[0].content.parts:
-                if part.inline_data:
-                    imagem_bytes = part.inline_data.data
-                    break
-        except Exception as e:
-            log.warning("Imagem indisponível: %s", e)
-            if os.getenv("IMAGE_PROVIDER", "pollinations").lower() == "pollinations":
-                try:
-                    encoded = urllib.parse.quote(dados["image_prompt"], safe="")
-                    url = (
-                        "https://image.pollinations.ai/prompt/" + encoded
-                        + "?width=1024&height=768&nologo=true"
-                    )
-                    imagem_bytes = await asyncio.to_thread(
-                        lambda: urllib.request.urlopen(url, timeout=45).read()
-                    )
-                    log.info("Imagem da cena gerada pelo fallback Pollinations")
-                except Exception as fallback_error:
-                    log.warning("Fallback de imagem indisponível: %s", fallback_error)
-
-        return {"descricao": dados["descricao"], "imagem_bytes": imagem_bytes}
-
-    @staticmethod
-    def _localizacao_atual(contexto: str) -> str:
-        """Obtém a localização mais recente, inclusive no fallback offline."""
-        locais = re.findall(r"Localização:\s*([^.;]+)", contexto, flags=re.IGNORECASE)
-        return locais[-1].strip() if locais else (
-            contexto.split(".")[0].strip() or "a localização atual da aventura"
-        )
-
-    @staticmethod
-    def _progresso_atual(contexto: str) -> int:
-        etapas = re.findall(r"(?:Progressão: ação|ação registrada:)\s*(\d+)", contexto, flags=re.IGNORECASE)
-        return int(etapas[-1]) if etapas else 0
-
-    @staticmethod
-    def _campo_contexto(contexto: str, nome: str, padrao: str) -> str:
-        """Lê um campo curto do resumo da aventura sem depender da IA."""
-        match = re.search(
-            rf"{re.escape(nome)}:\s*([^.;]+)", contexto, flags=re.IGNORECASE
-        )
-        return match.group(1).strip() if match else padrao
-
-    # ── Util ──────────────────────────────────────────────────────────────────
-
-    async def _generate_json(self, prompt: str, fallback: dict) -> dict:
-        if self.model is None and not self.api_key and not self.alt_api_key:
-            return fallback
-
-        # Quando configurado, o provedor alternativo é a rota principal.
-        # Isso evita consumir uma cota Gemini já esgotada antes de narrar.
-        if (
-            self.alt_api_key
-            and self.alt_base_url
-            and self.alt_model
-            and self._provider_available("alternate")
-        ):
-            try:
-                return await self._generate_json_compatible(prompt)
-            except Exception as exc:
-                self._cooldown_provider("alternate", exc)
-                log.warning(
-                    "Falha no provedor alternativo (%s); tentando Gemini",
-                    exc,
-                )
-
-        try:
-            if self.model is not None and self._provider_available("gemini"):
-                resposta = await self.model.generate_content_async(prompt)
-                return self._parse_json(resposta.text)
-            if self.api_key and self._provider_available("gemini"):
-                return await self._generate_json_rest(prompt)
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            self._cooldown_provider("gemini", exc)
-            log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
-        except Exception as exc:
-            self._cooldown_provider("gemini", exc)
-            log.warning("Falha ao consultar Gemini; tentando provedor alternativo: %s", exc)
-        return fallback
-
-    def _provider_available(self, provider: str) -> bool:
-        until = self._provider_cooldowns.get(provider, 0)
-        if until <= time.monotonic():
-            self._provider_cooldowns.pop(provider, None)
-            return True
-        return False
-
-    def _cooldown_provider(self, provider: str, error: Exception) -> None:
-        text = str(error).lower()
-        if any(
-            marker in text
-            for marker in ("429", "quota", "rate limit", "resource exhausted", "too many")
-        ):
-            self._provider_cooldowns[provider] = (
-                time.monotonic() + self._cooldown_seconds
-            )
-            log.warning(
-                "Provedor %s em cooldown por %ss após limite de uso",
-                provider,
-                self._cooldown_seconds,
-            )
-
-    async def _generate_json_compatible(self, prompt: str) -> dict:
-        base_payload = {
-            "model": self.alt_model,
+    def _call_openai_compatible_json(self, base_url: str, api_key: str, model: str, prompt: str, provider: str):
+        if not base_url or not api_key or not model:
+            raise RuntimeError(f"{provider} não configurado")
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
+        payload = {
+            "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.8,
         }
-
-        async def call(payload: dict) -> dict:
-            request = urllib.request.Request(
-                f"{self.alt_base_url}/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.alt_api_key}",
-                },
-                method="POST",
-            )
-
-            def request_json():
-                try:
-                    with urllib.request.urlopen(request, timeout=45) as response:
-                        return json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    body = exc.read().decode("utf-8", errors="replace")
-                    raise RuntimeError(
-                        f"provedor alternativo HTTP {exc.code}: {body[:500]}"
-                    ) from exc
-
-            return await asyncio.to_thread(request_json)
-
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
-            response = await call({
-                **base_payload,
-                "response_format": {"type": "json_object"},
-            })
-        except RuntimeError as exc:
-            if "400" not in str(exc):
-                raise
-            log.warning("Modelo alternativo rejeitou response_format; tentando modo texto")
-            response = await call(base_payload)
+            with urllib.request.urlopen(req, timeout=30) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"{provider} HTTP {exc.code}: {exc.reason}") from exc
+        except Exception as exc:  # pragma: no cover - network path
+            raise RuntimeError(f"Falha de rede em {provider}: {exc}") from exc
+        data = json.loads(body)
+        try:
+            return self._parse_json(data["choices"][0]["message"]["content"])
+        except Exception:
+            # algumas APIs retornam uma string simples em content
+            content = data.get("choices", [{}])[0].get("message", {}).get("content")
+            if isinstance(content, str):
+                return self._parse_json(content)
+            raise
 
-        text = response["choices"][0]["message"]["content"]
-        return self._parse_json(text)
+    async def _request_json(self, prompt: str):
+        providers = []
+        if self.api_key and genai is not None and self.model:
+            providers.append(("gemini", lambda: self._call_gemini_json(prompt)))
+        if self.alt_api_key and self.alt_base_url and self.alt_model and self._provider_available("alternative"):
+            providers.append(("alternative", lambda: self._call_openai_compatible_json(self.alt_base_url, self.alt_api_key, self.alt_model, prompt, "alternative")))
+        if self.bastiao_api_key and self.bastiao_base_url and self.bastiao_model and self._provider_available("bastiao"):
+            providers.append(("bastiao", lambda: self._call_openai_compatible_json(self.bastiao_base_url, self.bastiao_api_key, self.bastiao_model, prompt, "bastiao")))
 
-    @staticmethod
-    def _acao_simples(acao: str) -> bool:
-        texto = unicodedata.normalize("NFD", acao.lower())
-        texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
-        exige_teste = (
-            r"\b(escond\w*|furt\w*|arrom\w*|lut\w*|atac\w*|"
-            r"convenc\w*|persuad\w*|investig\w*|procur\w*|examin\w*|"
-            r"perceb\w*|salt\w*|escal\w*|desarm\w*|conjur\w*|engan\w*)\b"
+        if not providers:
+            raise RuntimeError("Nenhum provedor ativo disponível")
+
+        last_error = None
+        for name, worker in providers:
+            try:
+                return await asyncio.to_thread(worker)
+            except Exception as exc:
+                last_error = exc
+                self._cooldown_provider(name, exc)
+                log.warning("Falha no provider %s: %s", name, exc)
+        raise last_error or RuntimeError("Falha ao obter resposta da IA")
+
+    async def iniciar_aventura(self, chat_id: int) -> dict:
+        aventura = self._offline_scene_seed(chat_id)
+        prompt = (
+            "Crie uma aventura de D&D 5e em português do Brasil em formato JSON: "
+            "{\"titulo\": \"...\", \"narrativa\": \"...\", \"contexto\": \"...\"}. "
+            "Mantenha a narrativa envolvente, com local, ameaça, objetivo e senso de mistério."
         )
-        movimento = (
-            r"\b(and\w*|caminh\w*|observ\w*|olh\w*|esper\w*|escut\w*|"
-            r"ouc\w*|fal\w*|convers\w*|peg\w*|segu\w*|avanc\w*|"
-            r"aproxim\w*|entr\w*|sai\w*)\b"
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict) and data.get("titulo") and data.get("narrativa") and data.get("contexto"):
+                return data
+        except Exception as exc:
+            log.warning("IA indisponível para iniciar aventura; usando fallback offline: %s", exc)
+        return aventura
+
+    async def criar_personagem(self, nome: str, classe: str, raca: str, detalhes: str = "") -> dict:
+        prompt = (
+            "Crie uma ficha de personagem de D&D 5e em JSON com chaves 'atributos' e 'historia'. "
+            "Use valores entre 8 e 18. Mantenha fidelidade à classe, raça e detalhes. "
+            f"Nome: {nome}. Classe: {classe}. Raça: {raca}. Detalhes: {detalhes or 'nenhum'}."
         )
-        return bool(re.search(movimento, texto)) and not re.search(exige_teste, texto)
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict) and isinstance(data.get("atributos"), dict) and data.get("historia"):
+                return {
+                    "atributos": {str(k): int(v) for k, v in data["atributos"].items()},
+                    "historia": data["historia"],
+                }
+        except Exception as exc:
+            log.warning("IA indisponível para criar personagem; usando fallback offline: %s", exc)
+        return self._offline_personagem(nome, classe, raca, detalhes)
 
-    async def _generate_json_rest(self, prompt: str) -> dict:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{urllib.parse.quote(self.model_name, safe='')}:generateContent"
-            f"?key={urllib.parse.quote(self.api_key, safe='')}"
+    async def avaliar_acao(self, sessao: dict, acao: str) -> dict:
+        prompt = (
+            "Avalie se esta ação exige teste de atributo e em qual atributo. "
+            "Retorne JSON: {'precisa_teste': true/false, 'atributo': 'Força', 'cd': 12, 'motivo': '...'} "
+            f"Contexto: {sessao.get('contexto', '')}. Ação: {acao}"
         )
-        payload = json.dumps({
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"},
-        }).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict):
+                if "precisa_teste" in data:
+                    return data
+        except Exception as exc:
+            log.warning("IA indisponível ao avaliar ação; usando fallback offline: %s", exc)
+
+        texto = (acao or "").lower()
+        simples = [
+            "caminho", "andar", "avanço", "aproximar", "aproximar-se", "se aproximar",
+            "entrar", "andar lentamente", "caminho até a entrada", "balcão"
+        ]
+        if any(item in texto for item in simples):
+            return {"precisa_teste": False, "atributo": "Destreza", "cd": 10, "motivo": "Ação simples"}
+        return {"precisa_teste": True, "atributo": "Destreza", "cd": 12, "motivo": "Ação arriscada"}
+
+    async def narrar_acao_com_dado(self, sessao: dict, personagem: dict, jogadores: list, acao: str, teste: dict | None) -> dict:
+        prompt = (
+            "Narre a ação de um personagem em D&D em português do Brasil. "
+            "Retorne JSON com chaves 'narrativa', 'novo_contexto' e 'sugestoes'. "
+            f"Contexto atual: {sessao.get('contexto', '')}. Personagem: {personagem.get('nome')} "
+            f"({personagem.get('classe')}, {personagem.get('raca')}). Ação: {acao}. "
+            f"Teste: {teste}."
         )
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict) and data.get("narrativa"):
+                novo_contexto = data.get("novo_contexto") or sessao.get("contexto", "")
+                sugestoes = data.get("sugestoes") or []
+                return {"narrativa": data["narrativa"], "novo_contexto": novo_contexto, "sugestoes": sugestoes}
+        except Exception as exc:
+            log.warning("IA indisponível para narrar ação; usando fallback offline: %s", exc)
 
-        def call():
-            with urllib.request.urlopen(request, timeout=45) as response:
-                return json.loads(response.read().decode("utf-8"))
+        contexto = sessao.get("contexto", "")
+        narr = (
+            f"{personagem.get('nome')} tenta: {acao}. A ação se desenrola com tensão, improviso e atenção ao ambiente. "
+            "O ritmo da cena se altera, e o que antes era apenas um risco agora se torna um momento decisivo."
+        )
+        novo_contexto = f"{contexto} Progressão: ação 1. Última ação de {personagem.get('nome')}: {acao}. Resultado: {narr}"
+        sugestoes = [
+            "Inspecionar a área em busca de pistas",
+            "Confrontar o inimigo mais próximo",
+            "Explorar a passagem oculta indicada pela cena",
+        ]
+        return {"narrativa": narr, "novo_contexto": novo_contexto, "sugestoes": sugestoes}
 
-        response = await asyncio.to_thread(call)
-        text = response["candidates"][0]["content"]["parts"][0]["text"]
-        return self._parse_json(text)
+    async def sugerir_acoes(self, sessao: dict, personagem: dict) -> dict:
+        prompt = (
+            "Sugira 3 ações úteis para um personagem em D&D. Retorne JSON {'sugestoes': [{...}]}. "
+            f"Contexto: {sessao.get('contexto', '')}. Personagem: {personagem.get('nome')}."
+        )
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict) and isinstance(data.get("sugestoes"), list):
+                return data
+        except Exception as exc:
+            log.warning("IA indisponível para sugerir ações; usando fallback offline: %s", exc)
+        return {"sugestoes": self._offline_sugestoes(sessao, personagem)}
 
-    def _parse_json(self, text: str) -> dict:
-        clean = re.sub(r"```(?:json)?|```", "", text).strip()
-        match = re.search(r"\{.*\}", clean, re.DOTALL)
-        if match:
-            clean = match.group()
-        return json.loads(clean)
+    async def gerar_cena(self, sessao: dict) -> dict:
+        prompt = (
+            "Descreva uma cena visual em estilo de RPG em JSON: {'descricao': '...', 'imagem_bytes': null}. "
+            f"Contexto: {sessao.get('contexto', '')}"
+        )
+        try:
+            data = await self._request_json(prompt)
+            if isinstance(data, dict) and data.get("descricao"):
+                return {"descricao": data["descricao"], "imagem_bytes": data.get("imagem_bytes")}
+        except Exception as exc:
+            log.warning("IA indisponível para gerar cena; usando fallback offline: %s", exc)
+        ctx = sessao.get("contexto", "")
+        desc = f"Cena atual: a tensão aumenta ao redor dos limites da aventura. O ambiente parece vivo, e a atenção se concentra em cada detalhe relevante. etapa 1 da cena principal. {ctx}"
+        return {"descricao": desc, "imagem_bytes": None}
+
+    async def gerar_imagem(self, sessao: dict):
+        if not self.api_key or not self.image_model:
+            return {"imagem_bytes": None, "descricao": "Sem imagem disponível."}
+        try:
+            prompt = f"Crie uma cena épica de fantasia para esta situação: {sessao.get('contexto', '')}"
+            response = self.image_model.generate_content(prompt)
+            if hasattr(response, "images") and response.images:
+                return {"imagem_bytes": response.images[0], "descricao": "Cena gerada"}
+        except Exception as exc:
+            log.warning("Imagem falhou; usando fallback textual: %s", exc)
+        return {"imagem_bytes": None, "descricao": "Cena textual disponível."}
+
+    def _choose_provider(self):
+        providers = [
+            ("gemini", self.api_key and genai is not None and self.model is not None),
+            ("alternative", bool(self.alt_api_key and self.alt_base_url and self.alt_model)),
+            ("bastiao", bool(self.bastiao_api_key and self.bastiao_base_url and self.bastiao_model)),
+        ]
+        for name, enabled in providers:
+            if enabled and self._provider_available(name):
+                return name
+        return "offline"
+
+
+__all__ = ["Narrator", "SYSTEM_PROMPT"]
