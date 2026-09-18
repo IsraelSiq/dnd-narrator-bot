@@ -335,7 +335,13 @@ async def cmd_acao(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         teste=teste
     )
 
-    db.atualizar_contexto(chat_id, resultado["novo_contexto"])
+    novo_contexto = resultado.get("novo_contexto", "").strip()
+    if not novo_contexto or novo_contexto == sessao["contexto"]:
+        novo_contexto = (
+            f"{sessao['contexto']} Última ação de {personagem['nome']}: {acao}. "
+            f"Resultado: {resultado['narrativa']}"
+        )
+    db.atualizar_contexto(chat_id, novo_contexto)
     db.registrar_acao(user.id, chat_id, acao, resultado["narrativa"])
 
     await update.message.reply_text(

@@ -286,9 +286,18 @@ Retorne APENAS JSON válido (sem markdown):
   "descricao": "Descrição visual cinematográfica da cena atual em português (2-3 frases)",
   "image_prompt": "Epic fantasy D&D scene, [detailed scene in English], dramatic lighting, detailed illustration, fantasy art style"
 }}"""
+        contexto = sessao.get("contexto", "").strip()
+        local = contexto.split(".")[0].strip() or "a localização atual da aventura"
         dados = await self._generate_json(prompt_desc, {
-            "descricao": "O Farol Antigo ilumina a chuva com um brilho azul espectral.",
-            "image_prompt": "An abandoned fantasy lighthouse on stormy cliffs, blue spectral light, cinematic dramatic lighting, detailed fantasy illustration",
+            "descricao": (
+                f"A cena atual se passa em {local}. O ambiente mostra os sinais "
+                "mais recentes da aventura e permanece em estado de alerta."
+            ),
+            "image_prompt": (
+                "Current D&D fantasy adventure scene at "
+                f"{local}. Context: {contexto}. Cinematic lighting, "
+                "detailed fantasy illustration, no lighthouse unless the context mentions one."
+            ),
         })
 
         imagem_bytes = None
