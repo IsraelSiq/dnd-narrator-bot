@@ -287,18 +287,22 @@ Retorne APENAS JSON válido (sem markdown):
 
     async def sugerir_acoes(self, sessao: dict, personagem: dict) -> dict:
         """Gera sugestões de ação personalizadas com base nos atributos e contexto."""
+        contexto = sessao["contexto"].strip()
         atributos_str = ", ".join(
             f"{k}: {v}" for k, v in personagem["atributos"].items()
         )
         prompt = f"""CONTEXTO DA AVENTURA:
-{sessao['contexto']}
+{contexto}
 
 PERSONAGEM:
 Nome: {personagem['nome']} | Classe: {personagem['classe']} | Raça: {personagem['raca']}
 Atributos: {atributos_str}
 
-Sugira 5 ações criativas e coerentes com o contexto atual da aventura E com os pontos fortes
-deste personagem (prefira ações que usem os atributos mais altos).
+Sugira 5 ações criativas e imediatamente executáveis nesta cena específica.
+Cada ação deve reagir a um elemento concreto do contexto atual (localização,
+ameaça, objetivo, pista, inimigo ou consequência mais recente) e aos pontos
+fortes deste personagem. Não sugira ações genéricas que poderiam servir para
+qualquer aventura e não reinicie a história.
 
 Retorne APENAS JSON válido (sem markdown):
 {{
@@ -310,16 +314,20 @@ Retorne APENAS JSON válido (sem markdown):
     {{"acao": "...", "atributo": "...", "cd": 18, "risco": "..."}}
   ]
 }}"""
-        local_atual = self._localizacao_atual(sessao["contexto"])
-        return await self._generate_json(prompt, {
+        local_atual = self._localizacao_atual(contexto)
+        ameaca = self._campo_contexto(contexto, "Ameaça", "perigo ativo na cena")
+        objetivo = self._campo_contexto(contexto, "Objetivo", "entender a situação atual")
+        pista = self._campo_contexto(contexto, "Progressão", "a última consequência da ação")
+        fallback = {
             "sugestoes": [
-                {"acao": f"Examino os sinais em {local_atual}.", "atributo": "Sabedoria", "cd": 10, "risco": "baixo"},
-                {"acao": "Avanço com a arma preparada.", "atributo": "Destreza", "cd": 12, "risco": "médio"},
-                {"acao": "Procuro a origem da ameaça atual.", "atributo": "Inteligência", "cd": 14, "risco": "médio"},
-                {"acao": "Tento chamar quem está por perto.", "atributo": "Carisma", "cd": 10, "risco": "baixo"},
-                {"acao": "Abro à força o acesso bloqueado.", "atributo": "Força", "cd": 15, "risco": "alto"},
+                {"acao": f"Examino em {local_atual} os sinais ligados a {ameaca}.", "atributo": "Sabedoria", "cd": 10, "risco": "baixo"},
+                {"acao": f"Procuro uma forma de avançar o objetivo: {objetivo}.", "atributo": "Inteligência", "cd": 12, "risco": "médio"},
+                {"acao": f"Investigo a consequência mais recente ({pista}) antes de agir.", "atributo": "Inteligência", "cd": 14, "risco": "médio"},
+                {"acao": f"Encaro ou interpelo quem estiver relacionado a {ameaca}.", "atributo": "Carisma", "cd": 12, "risco": "médio"},
+                {"acao": f"Preparo uma abordagem cautelosa em {local_atual} para conter {ameaca}.", "atributo": "Destreza", "cd": 15, "risco": "alto"},
             ]
-        })
+        }
+        return await self._generate_json(prompt, fallback)
 
     # ── Gerar cena (imagem) ───────────────────────────────────────────────────
 
@@ -392,6 +400,14 @@ Retorne APENAS JSON válido (sem markdown):
     def _progresso_atual(contexto: str) -> int:
         etapas = re.findall(r"(?:Progressão: ação|ação registrada:)\s*(\d+)", contexto, flags=re.IGNORECASE)
         return int(etapas[-1]) if etapas else 0
+
+    @staticmethod
+    def _campo_contexto(contexto: str, nome: str, padrao: str) -> str:
+        """Lê um campo curto do resumo da aventura sem depender da IA."""
+        match = re.search(
+            rf"{re.escape(nome)}:\s*([^.;]+)", contexto, flags=re.IGNORECASE
+        )
+        return match.group(1).strip() if match else padrao
 
     # ── Util ──────────────────────────────────────────────────────────────────
 

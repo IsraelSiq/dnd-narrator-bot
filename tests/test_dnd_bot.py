@@ -46,6 +46,25 @@ class NarratorTests(unittest.TestCase):
         result = asyncio.run(narrator.avaliar_acao(session, "avanço até o balcão"))
         self.assertFalse(result["precisa_teste"])
 
+    def test_suggestions_follow_current_scene(self):
+        narrator = Narrator("")
+        session = {
+            "contexto": (
+                "Localização: balcão do Farol. Ameaça: inimigos imobilizados. "
+                "Objetivo: dispersar os inimigos. Progressão: ação 3 concluída."
+            )
+        }
+        character = {
+            "nome": "Artheal",
+            "classe": "Mago",
+            "raca": "Elfo",
+            "atributos": {"Inteligência": 16, "Destreza": 14},
+        }
+        result = asyncio.run(narrator.sugerir_acoes(session, character))
+        actions = " ".join(item["acao"] for item in result["sugestoes"])
+        self.assertIn("inimigos", actions)
+        self.assertIn("balcão", actions)
+
     def test_character_details_shape_offline_fallback(self):
         ficha = asyncio.run(
             Narrator("").criar_personagem(
