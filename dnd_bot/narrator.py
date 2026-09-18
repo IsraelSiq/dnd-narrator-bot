@@ -1,0 +1,332 @@
+"""
+narrator.py — Toda a inteligência do jogo via Gemini
+"""
+
+import json
+import logging
+import os
+import random
+import re
+
+try:
+    import google.generativeai as genai
+    from google.generativeai import types as gtypes
+except Exception:  # O modo offline também cobre incompatibilidade do SDK.
+    genai = None
+    gtypes = None
+
+
+log = logging.getLogger(__name__)
+
+
+SYSTEM_PROMPT = """Você é um Mestre de RPG experiente e criativo especializado em D&D 5e.
+Você narra aventuras épicas, dramáticas e imersivas em português do Brasil.
+Seu estilo é cinematográfico, com descrições vívidas e tensão dramática adequada.
+Sempre mantenha a consistência com o contexto da aventura e as escolhas dos jogadores.
+Seja justo, mas desafiador. Recompense a criatividade.
+Quando houver falha crítica (dado 1), o resultado deve ser catastrófico e cômico/dramático.
+Quando houver sucesso crítico (dado 20), o resultado deve ser épico e memorável."""
+
+
+class Narrator:
+    def __init__(self, api_key: str):
+        self.model = None
+        self.image_model = None
+        self.provider_status = "offline"
+        if api_key and genai is not None:
+            genai.configure(api_key=api_key)
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+            self.model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=SYSTEM_PROMPT
+            )
+            self.image_model = genai.GenerativeModel(
+                os.getenv("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002")
+            )
+            self.provider_status = f"gemini:{model_name}"
+        else:
+            log.warning("Gemini indisponível; usando o narrador offline.")
+
+    # ── Iniciar aventura ──────────────────────────────────────────────────────
+
+    async def iniciar_aventura(self, chat_id: int) -> dict:
+        prompt = """Crie o início de uma aventura D&D original e envolvente.
+Retorne APENAS um JSON válido (sem markdown):
+{
+  "titulo": "Nome épico da aventura",
+  "narrativa": "Narração de abertura imersiva com 3-4 parágrafos",
+  "contexto": "Resumo técnico do estado atual (localização, ameaças, objetivos, elementos do cenário)"
+}"""
+        aventuras = [
+            {
+                "titulo": "As Cinzas do Farol Antigo",
+                "narrativa": "Uma luz azul desperta no farol abandonado durante a tempestade. Pegadas recentes e correntes quebradas indicam que algo despertou sob as ruínas.",
+                "contexto": "Localização: Farol Antigo. Ameaça: presença desconhecida sob as ruínas. Objetivo: investigar a luz azul.",
+            },
+            {
+                "titulo": "O Juramento da Floresta Sombria",
+                "narrativa": "A floresta silencia quando uma árvore ancestral começa a sangrar seiva dourada. Um corvo deixa aos seus pés uma chave marcada com o brasão de um reino desaparecido.",
+                "contexto": "Localização: clareira da Floresta Sombria. Ameaça: maldição na árvore ancestral. Objetivo: descobrir a origem da chave.",
+            },
+            {
+                "titulo": "A Cripta sob a Cidade",
+                "narrativa": "Na praça central, a terra afunda e revela degraus que descem para uma cripta esquecida. De lá vem o som de sinos, embora a cidade não tenha uma torre.",
+                "contexto": "Localização: praça da cidade. Ameaça: cripta recém-aberta e sinos sobrenaturais. Objetivo: explorar as ruínas.",
+            },
+            {
+                "titulo": "O Tremor da Montanha Vermelha",
+                "narrativa": "Um tremor racha a encosta e expõe uma porta de obsidiana. Símbolos antigos brilham quando vocês se aproximam, como se a montanha reconhecesse seus nomes.",
+                "contexto": "Localização: encosta da Montanha Vermelha. Ameaça: porta selada e magia antiga. Objetivo: descobrir o que está despertando.",
+            },
+        ]
+        return await self._generate_json(prompt, random.choice(aventuras))
+
+    # ── Criar personagem ──────────────────────────────────────────────────────
+
+    async def criar_personagem(self, nome: str, classe: str, raca: str) -> dict:
+        prompt = f"""Crie uma ficha D&D 5e para:
+Nome: {nome} | Classe: {classe} | Raça: {raca}
+
+Retorne APENAS JSON válido (sem markdown):
+{{
+  "atributos": {{
+    "Força": <8-18>,
+    "Destreza": <8-18>,
+    "Constituição": <8-18>,
+    "Inteligência": <8-18>,
+    "Sabedoria": <8-18>,
+    "Carisma": <8-18>
+  }},
+  "historia": "História de origem em 2-3 frases"
+}}
+
+Regras obrigatórias de D&D 5e:
+- A classe não concede bônus ou penalidade de atributo; use-a apenas para
+  escolher atributos recomendados e escrever a história.
+- Aplique somente os bônus raciais padrão da raça escolhida.
+- Não crie penalizadores raciais.
+Humano: +1 em todos; Elfo: +2 Destreza, +1 Inteligência; Anão: +2 Constituição,
++1 Sabedoria; Halfling: +2 Destreza, +1 Carisma; Tiefling: +1 Inteligência,
++2 Carisma; Meio-Orc: +2 Força, +1 Constituição.
+Distribua valores-base entre 8 e 15 e retorne os valores finais após os bônus."""
+        atributos_base = {
+            "Força": 12, "Destreza": 12, "Constituição": 12,
+            "Inteligência": 12, "Sabedoria": 11, "Carisma": 11,
+        }
+        bonus_racial = {
+            "Humano": {"Força": 1, "Destreza": 1, "Constituição": 1, "Inteligência": 1, "Sabedoria": 1, "Carisma": 1},
+            "Elfo": {"Destreza": 2, "Inteligência": 1},
+            "Anão": {"Constituição": 2, "Sabedoria": 1},
+            "Halfling": {"Destreza": 2, "Carisma": 1},
+            "Tiefling": {"Inteligência": 1, "Carisma": 2},
+            "Meio-Orc": {"Força": 2, "Constituição": 1},
+        }
+        for atributo, bonus in bonus_racial.get(raca, {}).items():
+            atributos_base[atributo] += bonus
+
+        return await self._generate_json(prompt, {
+            "atributos": atributos_base,
+            "historia": (
+                f"{nome} cresceu entre histórias sobre fronteiras perigosas e "
+                f"aprendeu a sobreviver usando sua vocação de {classe}. "
+                f"Agora, a origem {raca} de {nome} o conduz até esta aventura."
+            ),
+        })
+
+    # ── Avaliar dificuldade da ação ───────────────────────────────────────────
+
+    async def avaliar_acao(self, sessao: dict, acao: str) -> dict:
+        """
+        Pede ao Gemini para avaliar a ação ANTES de narrar:
+        - Qual atributo usar (se não detectado automaticamente)
+        - CD (Classe de Dificuldade): 5=fácil, 10=médio, 15=difícil, 20=muito difícil, 25=quase impossível
+        - Se precisa de teste ou é automático
+        """
+        prompt = f"""CONTEXTO DA AVENTURA:
+{sessao['contexto']}
+
+AÇÃO DO JOGADOR: "{acao}"
+
+Analise esta ação e retorne APENAS JSON válido (sem markdown):
+{{
+  "precisa_teste": true ou false,
+  "atributo": "Força|Destreza|Constituição|Inteligência|Sabedoria|Carisma",
+  "cd": <5 a 25>,
+  "justificativa": "Por que este atributo e esta CD (1 frase curta)"
+}}
+
+Se a ação for trivial (andar, falar normalmente, pegar objeto em cima de uma mesa), precisa_teste=false.
+Se for arriscada ou habilidosa, precisa_teste=true com CD proporcional ao risco."""
+        return await self._generate_json(prompt, {
+            "precisa_teste": True,
+            "atributo": "Destreza",
+            "cd": 12,
+            "justificativa": "A ação envolve risco e exige atenção ou habilidade.",
+        })
+
+    # ── Narrar ação com resultado do dado ────────────────────────────────────
+
+    async def narrar_acao_com_dado(
+        self,
+        sessao: dict,
+        personagem: dict,
+        jogadores: list,
+        acao: str,
+        teste: dict | None = None   # resultado do dice.realizar_teste(), ou None se não houve teste
+    ) -> dict:
+        jogadores_str = ", ".join(
+            f"{j['nome']} ({j['classe']} {j['raca']})" for j in jogadores
+        ) or "Nenhum outro jogador"
+
+        atributos_str = ", ".join(
+            f"{k}: {v}" for k, v in personagem["atributos"].items()
+        )
+
+        # Monta o bloco do teste pra passar pro Gemini
+        if teste:
+            if teste["critico_sucesso"]:
+                resultado_dado = f"SUCESSO CRÍTICO (dado 20 natural)! Narrar resultado ÉPICO e extraordinário."
+            elif teste["falha_critica"]:
+                resultado_dado = f"FALHA CRÍTICA (dado 1 natural)! Narrar resultado DESASTROSO, dramático e possivelmente cômico."
+            elif teste["sucesso"]:
+                resultado_dado = f"SUCESSO (rolou {teste['total']} vs CD {teste['dificuldade']}). Narrar resultado positivo."
+            else:
+                resultado_dado = f"FALHA (rolou {teste['total']} vs CD {teste['dificuldade']}). Narrar consequência negativa ou obstáculo."
+        else:
+            resultado_dado = "Ação simples sem teste, narrar normalmente."
+
+        prompt = f"""CONTEXTO DA AVENTURA:
+{sessao['contexto']}
+
+PERSONAGEM AGINDO:
+Nome: {personagem['nome']} | Classe: {personagem['classe']} | Raça: {personagem['raca']}
+Atributos: {atributos_str}
+
+OUTROS JOGADORES: {jogadores_str}
+
+AÇÃO: "{acao}"
+RESULTADO DO DADO: {resultado_dado}
+
+Continue a aventura a partir EXATAMENTE do contexto fornecido. Não reinicie a
+história, não troque a localização sem justificativa e não mencione cenas de
+outras aventuras. Narre o resultado de forma cinematográfica e imersiva
+respeitando EXATAMENTE o resultado do dado.
+Retorne APENAS JSON válido (sem markdown):
+{{
+  "narrativa": "Narração do resultado (2-3 parágrafos vívidos e dramáticos)",
+  "novo_contexto": "Contexto atualizado da aventura após esta ação",
+  "sugestoes": ["Sugestão 1 coerente com a situação", "Sugestão 2", "Sugestão 3"]
+}}"""
+
+        local_atual = sessao["contexto"].split(".")[0].strip()
+        fallback = {
+            "narrativa": (
+                f"Em {local_atual}, {personagem['nome']} age com cautela. "
+                "O resultado da tentativa muda a situação, mas o perigo ainda "
+                "não foi vencido. Uma nova pista surge diante do grupo."
+            ),
+            "novo_contexto": (
+                f"{sessao['contexto']} Estado após a ação: {personagem['nome']} "
+                f"tentou {acao}. A situação avançou e uma nova pista foi revelada."
+            ),
+            "sugestoes": [
+                "Examino os sinais recentes na área.",
+                "Avanço com o grupo mantendo a guarda.",
+                "Procuro uma pista que ajude a entender a ameaça.",
+            ],
+        }
+        return await self._generate_json(prompt, fallback)
+
+    # ── Sugerir ações para o personagem ──────────────────────────────────────
+
+    async def sugerir_acoes(self, sessao: dict, personagem: dict) -> dict:
+        """Gera sugestões de ação personalizadas com base nos atributos e contexto."""
+        atributos_str = ", ".join(
+            f"{k}: {v}" for k, v in personagem["atributos"].items()
+        )
+        prompt = f"""CONTEXTO DA AVENTURA:
+{sessao['contexto']}
+
+PERSONAGEM:
+Nome: {personagem['nome']} | Classe: {personagem['classe']} | Raça: {personagem['raca']}
+Atributos: {atributos_str}
+
+Sugira 5 ações criativas e coerentes com o contexto atual da aventura E com os pontos fortes
+deste personagem (prefira ações que usem os atributos mais altos).
+
+Retorne APENAS JSON válido (sem markdown):
+{{
+  "sugestoes": [
+    {{"acao": "Descrição da ação", "atributo": "Atributo usado", "cd": 12, "risco": "baixo|médio|alto"}},
+    {{"acao": "...", "atributo": "...", "cd": 10, "risco": "..."}},
+    {{"acao": "...", "atributo": "...", "cd": 15, "risco": "..."}},
+    {{"acao": "...", "atributo": "...", "cd": 8,  "risco": "..."}},
+    {{"acao": "...", "atributo": "...", "cd": 18, "risco": "..."}}
+  ]
+}}"""
+        local_atual = sessao["contexto"].split(".")[0].strip()
+        return await self._generate_json(prompt, {
+            "sugestoes": [
+                {"acao": f"Examino os sinais em {local_atual}.", "atributo": "Sabedoria", "cd": 10, "risco": "baixo"},
+                {"acao": "Avanço com a arma preparada.", "atributo": "Destreza", "cd": 12, "risco": "médio"},
+                {"acao": "Procuro a origem da ameaça atual.", "atributo": "Inteligência", "cd": 14, "risco": "médio"},
+                {"acao": "Tento chamar quem está por perto.", "atributo": "Carisma", "cd": 10, "risco": "baixo"},
+                {"acao": "Abro à força o acesso bloqueado.", "atributo": "Força", "cd": 15, "risco": "alto"},
+            ]
+        })
+
+    # ── Gerar cena (imagem) ───────────────────────────────────────────────────
+
+    async def gerar_cena(self, sessao: dict) -> dict:
+        prompt_desc = f"""Com base neste contexto de aventura D&D:
+{sessao['contexto']}
+
+Retorne APENAS JSON válido (sem markdown):
+{{
+  "descricao": "Descrição visual cinematográfica da cena atual em português (2-3 frases)",
+  "image_prompt": "Epic fantasy D&D scene, [detailed scene in English], dramatic lighting, detailed illustration, fantasy art style"
+}}"""
+        dados = await self._generate_json(prompt_desc, {
+            "descricao": "O Farol Antigo ilumina a chuva com um brilho azul espectral.",
+            "image_prompt": "An abandoned fantasy lighthouse on stormy cliffs, blue spectral light, cinematic dramatic lighting, detailed fantasy illustration",
+        })
+
+        imagem_bytes = None
+        try:
+            if self.image_model is None or gtypes is None:
+                return {"descricao": dados["descricao"], "imagem_bytes": None}
+            resp_img = await self.image_model.generate_content_async(
+                dados["image_prompt"],
+                generation_config=gtypes.GenerationConfig(
+                    response_modalities=["IMAGE"]
+                )
+            )
+            for part in resp_img.candidates[0].content.parts:
+                if part.inline_data:
+                    imagem_bytes = part.inline_data.data
+                    break
+        except Exception as e:
+            log.warning("Imagem indisponível: %s", e)
+
+        return {"descricao": dados["descricao"], "imagem_bytes": imagem_bytes}
+
+    # ── Util ──────────────────────────────────────────────────────────────────
+
+    async def _generate_json(self, prompt: str, fallback: dict) -> dict:
+        if self.model is None:
+            return fallback
+        try:
+            resposta = await self.model.generate_content_async(prompt)
+            return self._parse_json(resposta.text)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
+        except Exception as exc:
+            log.warning("Falha ao consultar Gemini; usando fallback: %s", exc)
+        return fallback
+
+    def _parse_json(self, text: str) -> dict:
+        clean = re.sub(r"```(?:json)?|```", "", text).strip()
+        match = re.search(r"\{.*\}", clean, re.DOTALL)
+        if match:
+            clean = match.group()
+        return json.loads(clean)
