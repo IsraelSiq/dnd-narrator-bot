@@ -38,6 +38,20 @@ class NarratorTests(unittest.TestCase):
         scene = asyncio.run(narrator.gerar_cena({"contexto": result["novo_contexto"]}))
         self.assertIn("etapa 1", scene["descricao"])
 
+    def test_simple_actions_do_not_require_dice(self):
+        narrator = Narrator("")
+        session = {"contexto": "Localização: Farol Antigo. Ameaça: ruínas."}
+        result = asyncio.run(narrator.avaliar_acao(session, "caminho até a entrada"))
+        self.assertFalse(result["precisa_teste"])
+
+    def test_character_details_shape_offline_fallback(self):
+        ficha = asyncio.run(
+            Narrator("").criar_personagem(
+                "Kira", "Ladina", "Elfo", "coleciona chaves e teme espaços fechados"
+            )
+        )
+        self.assertIn("coleciona chaves", ficha["historia"])
+
 
 class DiceTests(unittest.TestCase):
     def test_attribute_modifier_and_result_shape(self):

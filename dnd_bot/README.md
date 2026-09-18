@@ -68,7 +68,8 @@ O processo agora tenta reconectar automaticamente a cada 15 segundos.
 ### Iniciando uma partida
 1. Adicione o bot a um grupo do Telegram (ou converse diretamente)
 2. Use `/nova_aventura` para o Gemini gerar um cenário
-3. Cada jogador usa `/entrar` e responde às perguntas de nome, classe e raça
+3. Cada jogador usa `/entrar` e responde às perguntas de nome, classe, raça e
+   detalhes livres do personagem (arquétipo, manias e histórico)
 
 ### Durante o jogo
 - `/acao` + descrição da ação para interagir com a aventura
@@ -76,10 +77,14 @@ O processo agora tenta reconectar automaticamente a cada 15 segundos.
 - `/ficha` para ver sua ficha de personagem
 - `/jogadores` para ver quem está na sessão
 
+A rolagem acontece apenas quando a ação envolve risco, perícia ou habilidade.
+Deslocamentos e interações simples são narrados diretamente, sem interromper o
+fluxo com um teste.
+
 ### Exemplos de uso
 ```
 /entrar
-# O bot pergunta o nome, mostra as classes e depois mostra as raças.
+# O bot pergunta nome, classe, raça e detalhes livres do personagem.
 # Use /cancelar a qualquer momento durante a criação.
 
 /acao Examino as paredes da masmorra em busca de passagens secretas

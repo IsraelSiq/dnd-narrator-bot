@@ -92,9 +92,12 @@ Retorne APENAS um JSON válido (sem markdown):
 
     # ── Criar personagem ──────────────────────────────────────────────────────
 
-    async def criar_personagem(self, nome: str, classe: str, raca: str) -> dict:
+    async def criar_personagem(
+        self, nome: str, classe: str, raca: str, detalhes: str = ""
+    ) -> dict:
         prompt = f"""Crie uma ficha D&D 5e para:
 Nome: {nome} | Classe: {classe} | Raça: {raca}
+Detalhes fornecidos pelo jogador: {detalhes or "nenhum; invente uma origem coerente"}
 
 Retorne APENAS JSON válido (sem markdown):
 {{
@@ -117,7 +120,9 @@ Regras obrigatórias de D&D 5e:
 Humano: +1 em todos; Elfo: +2 Destreza, +1 Inteligência; Anão: +2 Constituição,
 +1 Sabedoria; Halfling: +2 Destreza, +1 Carisma; Tiefling: +1 Inteligência,
 +2 Carisma; Meio-Orc: +2 Força, +1 Constituição.
-Distribua valores-base entre 8 e 15 e retorne os valores finais após os bônus."""
+Distribua valores-base entre 8 e 15 e retorne os valores finais após os bônus.
+Use os detalhes do jogador para adaptar a história, os atributos recomendados e
+a personalidade, sem alterar as regras de bônus raciais."""
         atributos_base = {
             "Força": 12, "Destreza": 12, "Constituição": 12,
             "Inteligência": 12, "Sabedoria": 11, "Carisma": 11,
@@ -138,7 +143,8 @@ Distribua valores-base entre 8 e 15 e retorne os valores finais após os bônus.
             "historia": (
                 f"{nome} cresceu entre histórias sobre fronteiras perigosas e "
                 f"aprendeu a sobreviver usando sua vocação de {classe}. "
-                f"Agora, a origem {raca} de {nome} o conduz até esta aventura."
+                f"Agora, a origem {raca} de {nome} o conduz até esta aventura. "
+                f"Seus traços marcantes são: {detalhes or 'curiosidade e cautela'}."
             ),
         })
 
@@ -166,12 +172,36 @@ Analise esta ação e retorne APENAS JSON válido (sem markdown):
 
 Se a ação for trivial (andar, falar normalmente, pegar objeto em cima de uma mesa), precisa_teste=false.
 Se for arriscada ou habilidosa, precisa_teste=true com CD proporcional ao risco."""
-        return await self._generate_json(prompt, {
+        fallback = {
             "precisa_teste": True,
             "atributo": "Destreza",
             "cd": 12,
             "justificativa": "A ação envolve risco e exige atenção ou habilidade.",
-        })
+        }
+        simples = re.search(
+            r"\b(and(?:o|ar|ei|e)|caminh(?:o|ar|ando)|"
+            r"observo|olho|espero|escuto|ouço|falo|converso|"
+            r"pego|sigo|aproximo|aproximo-me|entro|saio)\b",
+            acao.lower(),
+        )
+        if simples and not re.search(
+            r"\b(escond|furt|arrom|lutar|atacar|convencer|persuad|"
+            r"investigar|procurar|examinar|perceber|saltar|escalar|"
+            r"desarmar|conjurar|enganar)\w*",
+            acao.lower(),
+        ):
+            fallback["precisa_teste"] = False
+            fallback["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
+        resultado = await self._generate_json(prompt, fallback)
+        if simples and not re.search(
+            r"\b(escond|furt|arrom|lutar|atacar|convencer|persuad|"
+            r"investigar|procurar|examinar|perceber|saltar|escalar|"
+            r"desarmar|conjurar|enganar)\w*",
+            acao.lower(),
+        ):
+            resultado["precisa_teste"] = False
+            resultado["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
+        return resultado
 
     # ── Narrar ação com resultado do dado ────────────────────────────────────
 

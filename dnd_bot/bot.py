@@ -74,7 +74,7 @@ async def cmd_nova_aventura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── /entrar — criação guiada de personagem ───────────────────────────────────
-ENTRAR_NOME, ENTRAR_CLASSE, ENTRAR_RACA = range(3)
+ENTRAR_NOME, ENTRAR_CLASSE, ENTRAR_RACA, ENTRAR_DETALHES = range(4)
 
 CLASSES = {
     "Guerreiro": "atributos recomendados: FOR ou DES, CON — mestre de armas e armaduras",
@@ -197,7 +197,7 @@ async def receber_raca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ENTRAR_RACA
 
-    estado = estados_entrada(ctx).pop(estado_key(update), None)
+    estado = estados_entrada(ctx).get(estado_key(update))
     if not estado or "personagem" not in estado:
         await update.message.reply_text("⚠️ A criação expirou. Use /entrar novamente.")
         return
@@ -205,10 +205,32 @@ async def receber_raca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nome = personagem["nome"]
     classe = personagem["classe"]
     raca = escolha
+    personagem["raca"] = escolha
+    estado["etapa"] = "detalhes"
     await update.message.reply_text(
-        "🧙 Criando sua ficha...", reply_markup=ReplyKeyboardRemove()
+        "4️⃣ Agora descreva detalhes do personagem (opcional): arquétipo, manias, "
+        "medos, objetivo, profissão anterior ou qualquer detalhe histórico.\n\n"
+        "Escreva `nenhum` se prefere que o narrador decida.",
+        reply_markup=ReplyKeyboardRemove()
     )
-    ficha = await narrator.criar_personagem(nome, classe, raca)
+    return ENTRAR_DETALHES
+
+
+async def receber_detalhes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    estado = estados_entrada(ctx).pop(estado_key(update), None)
+    if not estado or "personagem" not in estado:
+        await update.message.reply_text("⚠️ A criação expirou. Use /entrar novamente.")
+        return
+    personagem = estado["personagem"]
+    nome = personagem["nome"]
+    classe = personagem["classe"]
+    raca = personagem["raca"]
+    detalhes = update.message.text.strip()
+    if detalhes.lower() in {"nenhum", "nenhuma", "n/a", "nao", "não"}:
+        detalhes = ""
+
+    await update.message.reply_text("🧙 Criando sua ficha...", reply_markup=ReplyKeyboardRemove())
+    ficha = await narrator.criar_personagem(nome, classe, raca, detalhes)
 
     db.salvar_personagem(
         user_id=update.effective_user.id, chat_id=update.effective_chat.id,
@@ -244,6 +266,8 @@ async def processar_entrada(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await receber_classe(update, ctx)
     if etapa == "raca":
         return await receber_raca(update, ctx)
+    if etapa == "detalhes":
+        return await receber_detalhes(update, ctx)
     if update.message:
         log.info("Mensagem sem fluxo ativo: chat=%s user=%s", *estado_key(update))
 
