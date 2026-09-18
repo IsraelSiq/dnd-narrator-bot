@@ -45,6 +45,14 @@ class NarratorTests(unittest.TestCase):
         self.assertFalse(result["precisa_teste"])
         result = asyncio.run(narrator.avaliar_acao(session, "avanço até o balcão"))
         self.assertFalse(result["precisa_teste"])
+        result = asyncio.run(
+            narrator.avaliar_acao(session, "se aproximar andando lentamente")
+        )
+        self.assertFalse(result["precisa_teste"])
+        result = asyncio.run(
+            narrator.avaliar_acao(session, "aproximar-se da porta")
+        )
+        self.assertFalse(result["precisa_teste"])
 
     def test_suggestions_follow_current_scene(self):
         narrator = Narrator("")

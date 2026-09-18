@@ -8,8 +8,10 @@ import os
 import random
 import re
 import urllib.parse
+import urllib.error
 import urllib.request
 import asyncio
+import unicodedata
 
 try:
     import google.generativeai as genai
@@ -35,6 +37,9 @@ class Narrator:
     def __init__(self, api_key: str):
         self.api_key = api_key or ""
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        self.alt_api_key = os.getenv("AI_API_KEY", "")
+        self.alt_base_url = os.getenv("AI_BASE_URL", "").rstrip("/")
+        self.alt_model = os.getenv("AI_MODEL", "")
         self.model = None
         self.image_model = None
         self.provider_status = "offline"
@@ -55,6 +60,8 @@ class Narrator:
         log.info("Narrador configurado: provedor=%s, imagens=%s",
                  self.provider_status,
                  os.getenv("IMAGE_PROVIDER", "pollinations"))
+        if self.alt_api_key and self.alt_base_url and self.alt_model:
+            log.info("Provedor alternativo configurado: %s", self.alt_model)
 
     # ── Iniciar aventura ──────────────────────────────────────────────────────
 
@@ -178,28 +185,12 @@ Se for arriscada ou habilidosa, precisa_teste=true com CD proporcional ao risco.
             "cd": 12,
             "justificativa": "A ação envolve risco e exige atenção ou habilidade.",
         }
-        simples = re.search(
-            r"\b(and(?:o|ar|ei|e)|caminh(?:o|ar|ando)|"
-            r"observo|olho|espero|escuto|ouço|falo|converso|"
-            r"pego|sigo|avanço|avanco|avançar|avancar|"
-            r"aproximo|aproximo-me|entro|saio)\b",
-            acao.lower(),
-        )
-        if simples and not re.search(
-            r"\b(escond|furt|arrom|lutar|atacar|convencer|persuad|"
-            r"investigar|procurar|examinar|perceber|saltar|escalar|"
-            r"desarmar|conjurar|enganar)\w*",
-            acao.lower(),
-        ):
+        simples = self._acao_simples(acao)
+        if simples:
             fallback["precisa_teste"] = False
             fallback["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
         resultado = await self._generate_json(prompt, fallback)
-        if simples and not re.search(
-            r"\b(escond|furt|arrom|lutar|atacar|convencer|persuad|"
-            r"investigar|procurar|examinar|perceber|saltar|escalar|"
-            r"desarmar|conjurar|enganar)\w*",
-            acao.lower(),
-        ):
+        if simples:
             resultado["precisa_teste"] = False
             resultado["justificativa"] = "Ação simples de deslocamento ou interação, sem teste."
         return resultado
@@ -412,18 +403,87 @@ Retorne APENAS JSON válido (sem markdown):
     # ── Util ──────────────────────────────────────────────────────────────────
 
     async def _generate_json(self, prompt: str, fallback: dict) -> dict:
-        if self.model is None and not self.api_key:
+        if self.model is None and not self.api_key and not self.alt_api_key:
             return fallback
         try:
             if self.model is not None:
                 resposta = await self.model.generate_content_async(prompt)
                 return self._parse_json(resposta.text)
-            return await self._generate_json_rest(prompt)
+            if self.api_key:
+                return await self._generate_json_rest(prompt)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
         except Exception as exc:
-            log.warning("Falha ao consultar Gemini; usando fallback: %s", exc)
+            log.warning("Falha ao consultar Gemini; tentando provedor alternativo: %s", exc)
+        if self.alt_api_key and self.alt_base_url and self.alt_model:
+            try:
+                return await self._generate_json_compatible(prompt)
+            except Exception as exc:
+                log.warning("Falha no provedor alternativo; usando fallback: %s", exc)
         return fallback
+
+    async def _generate_json_compatible(self, prompt: str) -> dict:
+        base_payload = {
+            "model": self.alt_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.8,
+        }
+
+        async def call(payload: dict) -> dict:
+            request = urllib.request.Request(
+                f"{self.alt_base_url}/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.alt_api_key}",
+                },
+                method="POST",
+            )
+
+            def request_json():
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"provedor alternativo HTTP {exc.code}: {body[:500]}"
+                    ) from exc
+
+            return await asyncio.to_thread(request_json)
+
+        try:
+            response = await call({
+                **base_payload,
+                "response_format": {"type": "json_object"},
+            })
+        except RuntimeError as exc:
+            if "400" not in str(exc):
+                raise
+            log.warning("Modelo alternativo rejeitou response_format; tentando modo texto")
+            response = await call(base_payload)
+
+        text = response["choices"][0]["message"]["content"]
+        return self._parse_json(text)
+
+    @staticmethod
+    def _acao_simples(acao: str) -> bool:
+        texto = unicodedata.normalize("NFD", acao.lower())
+        texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+        exige_teste = (
+            r"\b(escond\w*|furt\w*|arrom\w*|lut\w*|atac\w*|"
+            r"convenc\w*|persuad\w*|investig\w*|procur\w*|examin\w*|"
+            r"perceb\w*|salt\w*|escal\w*|desarm\w*|conjur\w*|engan\w*)\b"
+        )
+        movimento = (
+            r"\b(and\w*|caminh\w*|observ\w*|olh\w*|esper\w*|escut\w*|"
+            r"ouc\w*|fal\w*|convers\w*|peg\w*|segu\w*|avanc\w*|"
+            r"aproxim\w*|entr\w*|sai\w*)\b"
+        )
+        return bool(re.search(movimento, texto)) and not re.search(exige_teste, texto)
 
     async def _generate_json_rest(self, prompt: str) -> dict:
         url = (
