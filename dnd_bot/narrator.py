@@ -33,20 +33,23 @@ Quando houver sucesso crítico (dado 20), o resultado deve ser épico e memoráv
 
 class Narrator:
     def __init__(self, api_key: str):
+        self.api_key = api_key or ""
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         self.model = None
         self.image_model = None
         self.provider_status = "offline"
         if api_key and genai is not None:
             genai.configure(api_key=api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
             self.model = genai.GenerativeModel(
-                model_name=model_name,
+                model_name=self.model_name,
                 system_instruction=SYSTEM_PROMPT
             )
             self.image_model = genai.GenerativeModel(
                 os.getenv("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002")
             )
-            self.provider_status = f"gemini:{model_name}"
+            self.provider_status = f"gemini:{self.model_name}"
+        elif self.api_key:
+            self.provider_status = f"gemini-rest:{self.model_name}"
         else:
             log.warning("Gemini indisponível; usando o narrador offline.")
         log.info("Narrador configurado: provedor=%s, imagens=%s",
@@ -362,16 +365,44 @@ Retorne APENAS JSON válido (sem markdown):
     # ── Util ──────────────────────────────────────────────────────────────────
 
     async def _generate_json(self, prompt: str, fallback: dict) -> dict:
-        if self.model is None:
+        if self.model is None and not self.api_key:
             return fallback
         try:
-            resposta = await self.model.generate_content_async(prompt)
-            return self._parse_json(resposta.text)
+            if self.model is not None:
+                resposta = await self.model.generate_content_async(prompt)
+                return self._parse_json(resposta.text)
+            return await self._generate_json_rest(prompt)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             log.warning("Resposta inválida do Gemini; usando fallback: %s", exc)
         except Exception as exc:
             log.warning("Falha ao consultar Gemini; usando fallback: %s", exc)
         return fallback
+
+    async def _generate_json_rest(self, prompt: str) -> dict:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{urllib.parse.quote(self.model_name, safe='')}:generateContent"
+            f"?key={urllib.parse.quote(self.api_key, safe='')}"
+        )
+        payload = json.dumps({
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"},
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        def call():
+            with urllib.request.urlopen(request, timeout=45) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        response = await asyncio.to_thread(call)
+        text = response["candidates"][0]["content"]["parts"][0]["text"]
+        return self._parse_json(text)
 
     def _parse_json(self, text: str) -> dict:
         clean = re.sub(r"```(?:json)?|```", "", text).strip()
