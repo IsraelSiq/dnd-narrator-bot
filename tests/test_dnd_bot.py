@@ -43,6 +43,8 @@ class NarratorTests(unittest.TestCase):
         session = {"contexto": "Localização: Farol Antigo. Ameaça: ruínas."}
         result = asyncio.run(narrator.avaliar_acao(session, "caminho até a entrada"))
         self.assertFalse(result["precisa_teste"])
+        result = asyncio.run(narrator.avaliar_acao(session, "avanço até o balcão"))
+        self.assertFalse(result["precisa_teste"])
 
     def test_character_details_shape_offline_fallback(self):
         ficha = asyncio.run(

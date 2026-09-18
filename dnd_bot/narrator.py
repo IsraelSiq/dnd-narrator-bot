@@ -181,7 +181,8 @@ Se for arriscada ou habilidosa, precisa_teste=true com CD proporcional ao risco.
         simples = re.search(
             r"\b(and(?:o|ar|ei|e)|caminh(?:o|ar|ando)|"
             r"observo|olho|espero|escuto|ouço|falo|converso|"
-            r"pego|sigo|aproximo|aproximo-me|entro|saio)\b",
+            r"pego|sigo|avanço|avanco|avançar|avancar|"
+            r"aproximo|aproximo-me|entro|saio)\b",
             acao.lower(),
         )
         if simples and not re.search(
